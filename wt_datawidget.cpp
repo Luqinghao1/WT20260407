@@ -3,10 +3,11 @@
  * 文件作用: 数据编辑器主窗口实现文件
  * 功能描述:
  * 1. 管理 QTabWidget，支持多标签页显示多份数据文件。
- * 2. 实现了多文件同时打开、解析与展示的功能。
- * 3. 将9个数据处理按钮配置为 `QToolButton` 并设定为上图标下文字的单排样式。
- * 4. 【核心重构】使用 QPainter 动态生成9款对应功能的矢量图标，彻底解决无图可用的问题。
- * 5. 杜绝了底层计算或单位换算时产生科学计数法的问题，统一输出常规格式。
+ * 2. 实现了多文件同时打开、解析与展示的功能，并提供数据修改代理。
+ * 3. 动态配置9大功能按键（矢量图标+文字），实现与内部表格的解耦。
+ * 4. 【核心亮点】悬浮窗(Overlay)技术实现“滤波取样”面板嵌入，不破坏原界面布局，
+ * 自动探测底层 QTableView 的宽度实现完美右侧贴边，并支持鼠标按住左侧边缘拉伸宽度。
+ * 5. 处理各种数据保存、列属性替换和格式转换，杜绝了科学计数法。
  */
 
 #include "wt_datawidget.h"
@@ -16,15 +17,19 @@
 #include "datasamplingdialog.h"
 #include "dataunitdialog.h"
 #include "dataunitmanager.h"
+
+// Qt GUI 与事件模块
 #include <QToolButton>
 #include <QPainter>
 #include <QPixmap>
 #include <QPolygon>
+#include <QResizeEvent>
+#include <QMouseEvent>
 
-// 引入 QXlsx 支持数据直接写入 Excel
-#include "xlsxdocument.h"
-#include "xlsxformat.h"
-
+// Qt 视图与模型模块
+#include <QTableView>
+#include <QHeaderView>
+#include <QScrollBar>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QDebug>
@@ -35,8 +40,13 @@
 #include <QTextStream>
 #include <QDateTime>
 
+// 第三方 Excel 模块库
+#include "xlsxdocument.h"
+#include "xlsxformat.h"
+
 /**
- * @brief 统一应用数据对话框的样式，灰底黑字提高可视性
+ * @brief 内部辅助函数：统一应用数据对话框的样式，灰底黑字提高可视性
+ * @param dialog 需要被设置样式的 QWidget 指针
  */
 static void applyDataDialogStyle(QWidget* dialog) {
     if (!dialog) return;
@@ -55,7 +65,9 @@ static void applyDataDialogStyle(QWidget* dialog) {
 }
 
 /**
- * @brief 将双精度浮点数格式化为常规字符串，杜绝科学计数法
+ * @brief 内部辅助函数：将双精度浮点数格式化为常规字符串，杜绝科学计数法
+ * @param val 传入的浮点数值
+ * @return 转换后的常规格式字符串，并自动去除末尾多余的 0 和小数点
  */
 static QString formatToNormalNumber(double val) {
     QString res = QString::number(val, 'f', 8);
@@ -66,9 +78,16 @@ static QString formatToNormalNumber(double val) {
     return res;
 }
 
+// =========================================================================
+// =                           构造与初始化模块                               =
+// =========================================================================
+
 WT_DataWidget::WT_DataWidget(QWidget *parent) :
     QWidget(parent),
-    ui(new Ui::WT_DataWidget)
+    ui(new Ui::WT_DataWidget),
+    m_samplingWidget(nullptr),      // 初始化滤波取样悬浮界面为空指针
+    m_isSamplingMaximized(false),   // 初始化不为最大化状态
+    m_floatingWidth(-1)             // 初始宽度 -1 代表交给程序自动计算空白区域贴合
 {
     ui->setupUi(this);
     initUI();
@@ -91,26 +110,23 @@ QIcon WT_DataWidget::createCustomIcon(const QString& iconType)
     QPixmap pixmap(64, 64);
     pixmap.fill(Qt::transparent); // 透明背景
     QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing); // 抗锯齿开启
+    painter.setRenderHint(QPainter::Antialiasing); // 开启抗锯齿
 
     if (iconType == "open") {
-        // 绘制黄色文件夹 (打开数据)
         painter.setBrush(QColor("#FFCA28"));
         painter.setPen(Qt::NoPen);
         painter.drawRect(8, 24, 48, 32);
         painter.drawPolygon(QPolygon({QPoint(8, 24), QPoint(20, 12), QPoint(32, 12), QPoint(44, 24)}));
     }
     else if (iconType == "save") {
-        // 绘制绿色保存按钮(软盘概念)
         painter.setBrush(QColor("#4CAF50"));
         painter.setPen(Qt::NoPen);
         painter.drawRect(12, 12, 40, 40);
         painter.setBrush(Qt::white);
-        painter.drawRect(20, 12, 24, 16); // 顶部标签
-        painter.drawRect(24, 36, 16, 16); // 底部写入区
+        painter.drawRect(20, 12, 24, 16);
+        painter.drawRect(24, 36, 16, 16);
     }
     else if (iconType == "export") {
-        // 绘制绿色表格 (导出Excel)
         painter.setBrush(QColor("#43A047"));
         painter.setPen(Qt::NoPen);
         painter.drawRect(10, 10, 44, 44);
@@ -119,7 +135,6 @@ QIcon WT_DataWidget::createCustomIcon(const QString& iconType)
         painter.drawLine(32, 10, 32, 54);
     }
     else if (iconType == "unit") {
-        // 绘制青色标尺 (单位管理)
         painter.setBrush(QColor("#00ACC1"));
         painter.setPen(Qt::NoPen);
         painter.drawRect(8, 26, 48, 14);
@@ -129,49 +144,43 @@ QIcon WT_DataWidget::createCustomIcon(const QString& iconType)
         }
     }
     else if (iconType == "time") {
-        // 绘制橙色时钟 (时间转换)
         painter.setBrush(QColor("#FF9800"));
         painter.setPen(Qt::NoPen);
         painter.drawEllipse(12, 12, 40, 40);
         painter.setPen(QPen(Qt::white, 4, Qt::SolidLine, Qt::RoundCap));
-        painter.drawLine(32, 32, 32, 20); // 时针
-        painter.drawLine(32, 32, 42, 32); // 分针
+        painter.drawLine(32, 32, 32, 20);
+        painter.drawLine(32, 32, 42, 32);
     }
     else if (iconType == "pressuredrop") {
-        // 绘制红色下降箭头 (计算压降)
         painter.setBrush(QColor("#E53935"));
         painter.setPen(Qt::NoPen);
         painter.drawPolygon(QPolygon({QPoint(24, 10), QPoint(40, 10), QPoint(40, 34), QPoint(50, 34), QPoint(32, 54), QPoint(14, 34), QPoint(24, 34)}));
     }
     else if (iconType == "pwf") {
-        // 绘制深蓝井筒结构 (套压转流压)
         painter.setBrush(QColor("#3949AB"));
         painter.setPen(Qt::NoPen);
-        painter.drawRect(24, 8, 16, 48); // 井管
+        painter.drawRect(24, 8, 16, 48);
         painter.setBrush(QColor("#29B6F6"));
-        painter.drawRect(24, 36, 16, 20); // 内部流体
+        painter.drawRect(24, 36, 16, 20);
     }
     else if (iconType == "filter") {
-        // 绘制紫色漏斗 (滤波取样)
         painter.setBrush(QColor("#8E24AA"));
         painter.setPen(Qt::NoPen);
         painter.drawPolygon(QPolygon({QPoint(10, 12), QPoint(54, 12), QPoint(36, 32), QPoint(36, 52), QPoint(28, 52), QPoint(28, 32)}));
     }
     else if (iconType == "error") {
-        // 绘制深橙警示牌 (异常检查)
         painter.setBrush(QColor("#F4511E"));
         painter.setPen(Qt::NoPen);
         painter.drawPolygon(QPolygon({QPoint(32, 10), QPoint(56, 52), QPoint(8, 52)}));
         painter.setPen(QPen(Qt::white, 4, Qt::SolidLine, Qt::RoundCap));
-        painter.drawLine(32, 24, 32, 38); // 惊叹号竖线
-        painter.drawPoint(32, 46);        // 惊叹号底点
+        painter.drawLine(32, 24, 32, 38);
+        painter.drawPoint(32, 46);
     }
-
     return QIcon(pixmap);
 }
 
 /**
- * @brief 界面控件初始化，将9个按钮统一配置样式和自主生成的图标
+ * @brief 界面控件初始化，将9个按钮统一配置样式
  */
 void WT_DataWidget::initUI()
 {
@@ -192,27 +201,22 @@ void WT_DataWidget::initUI()
     // 循环遍历设置按钮样式
     for (int i = 0; i < toolButtons.size(); ++i) {
         if (toolButtons[i]) {
-            // 设置枚举：图标在上，文字在下
             toolButtons[i]->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-            // 调用程序化绘图赋予独立图标
             toolButtons[i]->setIcon(createCustomIcon(iconTypes[i]));
-            // 设定统一的图标显示大小
             toolButtons[i]->setIconSize(QSize(36, 36));
-            // 设定舒适的宽容尺寸，防止由于文字字数不同导致参差不齐
             toolButtons[i]->setMinimumSize(QSize(80, 75));
             toolButtons[i]->setMaximumSize(QSize(100, 90));
         }
     }
-
-    // 根据初始数据更新是否置灰
     updateButtonsState();
 }
 
 /**
- * @brief 绑定界面按键到各个功能槽函数
+ * @brief 绑定主界面所有按键到各个功能槽函数
  */
 void WT_DataWidget::setupConnections()
 {
+    // 顶部工具栏 9 大按钮
     connect(ui->btnOpenFile, &QToolButton::clicked, this, &WT_DataWidget::onOpenFile);
     connect(ui->btnSave, &QToolButton::clicked, this, &WT_DataWidget::onSave);
     connect(ui->btnExport, &QToolButton::clicked, this, &WT_DataWidget::onExportExcel);
@@ -223,9 +227,39 @@ void WT_DataWidget::setupConnections()
     connect(ui->btnFilterSample, &QToolButton::clicked, this, &WT_DataWidget::onFilterSample);
     connect(ui->btnErrorCheck, &QToolButton::clicked, this, &WT_DataWidget::onHighlightErrors);
 
+    // 标签页切换与关闭
     connect(ui->tabWidget, &QTabWidget::currentChanged, this, &WT_DataWidget::onTabChanged);
     connect(ui->tabWidget, &QTabWidget::tabCloseRequested, this, &WT_DataWidget::onTabCloseRequested);
 }
+
+/**
+ * @brief 动态更新9个按钮的可点击状态(无数据时置灰)
+ */
+void WT_DataWidget::updateButtonsState()
+{
+    bool hasSheet = (ui->tabWidget->count() > 0);
+    // 打开按钮永远可用，其它依赖数据的按钮视情况而定
+    ui->btnSave->setEnabled(hasSheet);
+    ui->btnExport->setEnabled(hasSheet);
+    ui->btnUnitManager->setEnabled(hasSheet);
+    ui->btnTimeConvert->setEnabled(hasSheet);
+    ui->btnPressureDropCalc->setEnabled(hasSheet);
+    ui->btnCalcPwf->setEnabled(hasSheet);
+    ui->btnFilterSample->setEnabled(hasSheet);
+    ui->btnErrorCheck->setEnabled(hasSheet);
+
+    // 更新底部状态栏的文件名显示
+    if (auto sheet = currentSheet()) {
+        ui->filePathLabel->setText(sheet->getFilePath());
+    } else {
+        ui->filePathLabel->setText("未加载文件");
+    }
+}
+
+
+// =========================================================================
+// =                         数据获取与状态代理模块                           =
+// =========================================================================
 
 DataSingleSheet* WT_DataWidget::currentSheet() const {
     return qobject_cast<DataSingleSheet*>(ui->tabWidget->currentWidget());
@@ -236,8 +270,7 @@ QStandardItemModel* WT_DataWidget::getDataModel() const {
     return nullptr;
 }
 
-QMap<QString, QStandardItemModel*> WT_DataWidget::getAllDataModels() const
-{
+QMap<QString, QStandardItemModel*> WT_DataWidget::getAllDataModels() const {
     QMap<QString, QStandardItemModel*> map;
     for (int i = 0; i < ui->tabWidget->count(); ++i) {
         DataSingleSheet* sheet = qobject_cast<DataSingleSheet*>(ui->tabWidget->widget(i));
@@ -259,21 +292,10 @@ bool WT_DataWidget::hasData() const {
     return ui->tabWidget->count() > 0;
 }
 
-void WT_DataWidget::updateButtonsState()
-{
-    bool hasSheet = (ui->tabWidget->count() > 0);
-    ui->btnSave->setEnabled(hasSheet);
-    ui->btnExport->setEnabled(hasSheet);
-    ui->btnUnitManager->setEnabled(hasSheet);
-    ui->btnTimeConvert->setEnabled(hasSheet);
-    ui->btnPressureDropCalc->setEnabled(hasSheet);
-    ui->btnCalcPwf->setEnabled(hasSheet);
-    ui->btnFilterSample->setEnabled(hasSheet);
-    ui->btnErrorCheck->setEnabled(hasSheet);
 
-    if (auto sheet = currentSheet()) ui->filePathLabel->setText(sheet->getFilePath());
-    else ui->filePathLabel->setText("未加载文件");
-}
+// =========================================================================
+// =                            文件 I/O 模块                                =
+// =========================================================================
 
 void WT_DataWidget::onOpenFile()
 {
@@ -282,11 +304,13 @@ void WT_DataWidget::onOpenFile()
     if (paths.isEmpty()) return;
 
     for (const QString& path : paths) {
+        // 如果是项目 json 配置文件则走单独解析
         if (path.endsWith(".json", Qt::CaseInsensitive)) {
             loadData(path, "json");
             return;
         }
 
+        // 调用数据导入格式向导窗口
         DataImportDialog dlg(path, this);
         applyDataDialogStyle(&dlg);
 
@@ -303,7 +327,9 @@ void WT_DataWidget::createNewTab(const QString& filePath, const DataImportSettin
         QFileInfo fi(filePath);
         ui->tabWidget->addTab(sheet, fi.fileName());
         ui->tabWidget->setCurrentWidget(sheet);
+        // 绑定单表的数据变更信号，向上传递
         connect(sheet, &DataSingleSheet::dataChanged, this, &WT_DataWidget::onSheetDataChanged);
+
         updateButtonsState();
         emit fileChanged(filePath, "text");
         emit dataChanged();
@@ -315,7 +341,7 @@ void WT_DataWidget::createNewTab(const QString& filePath, const DataImportSettin
 
 void WT_DataWidget::loadData(const QString& filePath, const QString& fileType)
 {
-    if (fileType == "json") return;
+    if (fileType == "json") return; // 暂由项目管理器处理 json
     DataImportDialog dlg(filePath, this);
     applyDataDialogStyle(&dlg);
     if (dlg.exec() == QDialog::Accepted) {
@@ -325,6 +351,7 @@ void WT_DataWidget::loadData(const QString& filePath, const QString& fileType)
 
 void WT_DataWidget::onSave() {
     QJsonArray allData;
+    // 遍历所有 Tab 获取子表格的序列化 JSON 数据
     for (int i = 0; i < ui->tabWidget->count(); ++i) {
         DataSingleSheet* sheet = qobject_cast<DataSingleSheet*>(ui->tabWidget->widget(i));
         if (sheet) allData.append(sheet->saveToJson());
@@ -349,6 +376,7 @@ void WT_DataWidget::loadFromProjectData() {
         return;
     }
 
+    // 兼容新老保存格式判断
     bool isNewFormat = false;
     if (!dataArray.isEmpty()) {
         QJsonValue first = dataArray.first();
@@ -397,6 +425,20 @@ void WT_DataWidget::clearAllData() {
     emit dataChanged();
 }
 
+
+// =========================================================================
+// =                            功能计算与代理模块                             =
+// =========================================================================
+
+void WT_DataWidget::onExportExcel() { if (auto s = currentSheet()) s->onExportExcel(); }
+void WT_DataWidget::onTimeConvert() { if (auto s = currentSheet()) s->onTimeConvert(); }
+void WT_DataWidget::onPressureDropCalc() { if (auto s = currentSheet()) s->onPressureDropCalc(); }
+void WT_DataWidget::onCalcPwf() { if (auto s = currentSheet()) s->onCalcPwf(); }
+void WT_DataWidget::onHighlightErrors() { if (auto s = currentSheet()) s->onHighlightErrors(); }
+
+/**
+ * @brief 响应单位管理按钮，处理复杂的列数据提取与计算换算
+ */
 void WT_DataWidget::onUnitManager()
 {
     QStandardItemModel* model = getDataModel();
@@ -416,6 +458,7 @@ void WT_DataWidget::onUnitManager()
     int rowCount = model->rowCount();
     int colCount = model->columnCount();
 
+    // 模式 A：在原表格上直接修改或者追加
     if (!saveToFile) {
         if (appendMode) {
             int insertPos = colCount;
@@ -456,20 +499,22 @@ void WT_DataWidget::onUnitManager()
         emit dataChanged();
         ui->statusLabel->setText("列属性与单位已在当前表格中更新完毕。");
 
+        // 模式 B：处理完毕后直接另存为一个独立的新文件页签
     } else {
         QVector<QStringList> fullTable;
         QStringList headers;
 
+        // 构建新表头
         for (int c = 0; c < colCount; ++c) {
             headers.append(model->horizontalHeaderItem(c) ? model->horizontalHeaderItem(c)->text() : "");
         }
-
         if (appendMode) {
             for (const auto& task : tasks) headers.append(task.newHeaderName);
         } else {
             for (const auto& task : tasks) headers[task.colIndex] = task.newHeaderName;
         }
 
+        // 遍历所有行进行数据推演计算
         for (int r = 0; r < rowCount; ++r) {
             QStringList rowData;
             for (int c = 0; c < colCount; ++c) rowData.append(model->item(r, c)->text());
@@ -508,6 +553,14 @@ void WT_DataWidget::onUnitManager()
     }
 }
 
+
+// =========================================================================
+// =                   悬浮窗模式的滤波与取样（完全剥离 QSplitter）             =
+// =========================================================================
+
+/**
+ * @brief 响应滤波取样按钮，创建绝对定位的子窗口悬浮在表格上方
+ */
 void WT_DataWidget::onFilterSample()
 {
     QStandardItemModel* model = getDataModel();
@@ -516,25 +569,183 @@ void WT_DataWidget::onFilterSample()
         return;
     }
 
-    DataSamplingDialog dialog(model, this);
-    if (dialog.exec() == QDialog::Accepted) {
-        QVector<QStringList> processedTable = dialog.getProcessedTable();
-        QStringList headers = dialog.getHeaders();
-        if (processedTable.isEmpty()) {
-            QMessageBox::warning(this, "错误", "处理后数据为空，请检查参数设置！");
-            return;
-        }
-        QString currentPath = getCurrentFileName();
-        saveAndLoadNewData(currentPath, headers, processedTable);
+    // 单例化模式避免重复创建
+    if (!m_samplingWidget) {
+        m_samplingWidget = new DataSamplingWidget(this);
+        m_samplingWidget->setObjectName("DataSamplingWidget");
+        // 使用明显的左边框和上边框与底层表格区分开
+        m_samplingWidget->setStyleSheet("#DataSamplingWidget { border-left: 2px solid #1890FF; border-top: 1px solid #D9D9D9; background-color: #FFFFFF; }");
+
+        // 绑定来自组件的控制指令
+        connect(m_samplingWidget, &DataSamplingWidget::requestMaximize, this, &WT_DataWidget::onSamplingMaximize);
+        connect(m_samplingWidget, &DataSamplingWidget::requestRestore, this, &WT_DataWidget::onSamplingRestore);
+        connect(m_samplingWidget, &DataSamplingWidget::requestClose, this, &WT_DataWidget::onSamplingClose);
+        connect(m_samplingWidget, &DataSamplingWidget::requestResize, this, &WT_DataWidget::onSamplingResized); // 监听用户拖拽左侧边缘
+        connect(m_samplingWidget, &DataSamplingWidget::processingFinished, this, &WT_DataWidget::onSamplingFinished);
+    }
+
+    // 把当前焦点页签的数据注入
+    m_samplingWidget->setModel(model);
+    m_samplingWidget->show();
+    m_samplingWidget->raise(); // 将其拉伸到 Z 轴最上层，避免被表格盖住
+
+    m_isSamplingMaximized = false;
+    m_floatingWidth = -1; // -1 告诉排版函数：请自动识别表格的空白区域去填满它
+    updateSamplingWidgetGeometry();
+}
+
+/** @brief 接收组件内发出的最大化请求（完全盖住数据表）*/
+void WT_DataWidget::onSamplingMaximize()
+{
+    m_isSamplingMaximized = true;
+    updateSamplingWidgetGeometry();
+}
+
+/** @brief 接收组件内发出的恢复大小请求（退回并吸附在数据表右边）*/
+void WT_DataWidget::onSamplingRestore()
+{
+    m_isSamplingMaximized = false;
+    m_floatingWidth = -1; // 恢复时重置掉用户的自定宽度，重新自动吸附空白区域
+    updateSamplingWidgetGeometry();
+}
+
+/** @brief 接收组件内发出的关闭请求 */
+void WT_DataWidget::onSamplingClose()
+{
+    if (m_samplingWidget) {
+        m_samplingWidget->hide();
     }
 }
 
+/**
+ * @brief 接收组件被手动拖拽改变宽度的反馈并计算新坐标
+ * @param dx 鼠标水平移动的差值
+ */
+void WT_DataWidget::onSamplingResized(int dx)
+{
+    if (m_isSamplingMaximized) return; // 逻辑保护：全屏状态不允许拖拽
+
+    QRect geom = m_samplingWidget->geometry();
+    int newWidth = geom.width() - dx;
+    int newX = geom.x() + dx;
+
+    // 约束1：最低保留 400 像素以呈现里面的图表元素
+    if (newWidth < 400) {
+        newX -= (400 - newWidth);
+        newWidth = 400;
+    }
+
+    // 约束2：不允许拖得太宽越过了底层表格的可视左边界
+    QWidget* currentTab = ui->tabWidget->currentWidget();
+    QPoint topLeft = currentTab->mapTo(this, QPoint(0, 0));
+    if (newX < topLeft.x()) {
+        newWidth -= (topLeft.x() - newX);
+        newX = topLeft.x();
+    }
+
+    m_floatingWidth = newWidth; // 记录用户手动设定的偏好宽度
+    m_samplingWidget->setGeometry(newX, geom.y(), newWidth, geom.height());
+}
+
+/**
+ * @brief 【核心亮点】动态坐标映射计算悬浮窗的具体位置
+ * 作用：
+ * 1. mapTo 确保能避开 QTabWidget 顶部的标签栏，完美与内部画布贴合。
+ * 2. 结合底层 QTableView 的特性，计算出实际数据显示的真实像素宽度，让功能窗口严丝合缝地贴在数据表旁边。
+ */
+void WT_DataWidget::updateSamplingWidgetGeometry()
+{
+    if (!m_samplingWidget || !m_samplingWidget->isVisible()) return;
+
+    QWidget* currentTab = ui->tabWidget->currentWidget();
+    if (!currentTab) {
+        m_samplingWidget->hide();
+        return;
+    }
+
+    // 将内部 Pane 的相对坐标(0,0)转换为在当前主界面容器上的绝对坐标
+    QPoint topLeft = currentTab->mapTo(this, QPoint(0, 0));
+    QSize tabSize = currentTab->size();
+
+    if (m_isSamplingMaximized) {
+        // 全覆盖模式：起点在 Pane 的左上，长宽完全一致
+        m_samplingWidget->setGeometry(topLeft.x(), topLeft.y(), tabSize.width(), tabSize.height());
+    } else {
+        int startX = topLeft.x();
+
+        // 情形 A：用户已经通过拖拽边缘自定义过宽度
+        if (m_floatingWidth > 0) {
+            startX = topLeft.x() + tabSize.width() - m_floatingWidth;
+        }
+        // 情形 B：程序首次加载，智能计算底层数据表格真实占用的宽度
+        else {
+            QTableView* view = currentTab->findChild<QTableView*>();
+            if (view) {
+                // 表格实际占用的总宽 = 数据列宽之和 + 左侧行号宽 + 垂直滚动条宽 + 外边框冗余(2px)
+                int columnsWidth = view->horizontalHeader()->length();
+                int vHeaderWidth = view->verticalHeader()->isVisible() ? view->verticalHeader()->width() : 0;
+                int scrollBarWidth = view->verticalScrollBar()->isVisible() ? view->verticalScrollBar()->width() : 0;
+
+                int totalTableWidth = columnsWidth + vHeaderWidth + scrollBarWidth + 2;
+                startX += totalTableWidth;
+            } else {
+                startX += tabSize.width() / 2; // 如果意外拿不到表格指针，给个保底的中分策略
+            }
+
+            // 安全限制：如果数据极其庞大铺满屏幕，防止悬浮窗被压缩消失，强行占其 450px 的右侧宽度
+            if (startX > topLeft.x() + tabSize.width() - 450) {
+                startX = topLeft.x() + tabSize.width() - 450;
+            }
+            // 实时把系统算出来的这个宽度赋值给 m_floatingWidth
+            m_floatingWidth = topLeft.x() + tabSize.width() - startX;
+        }
+
+        int finalWidth = topLeft.x() + tabSize.width() - startX;
+        m_samplingWidget->setGeometry(startX, topLeft.y(), finalWidth, tabSize.height());
+    }
+
+    // 更新完坐标后确保其没有被 Qt 的重绘机制盖在底下
+    m_samplingWidget->raise();
+}
+
+/**
+ * @brief 重载主界面缩放事件
+ * 作用：当用户拉伸改变软件大小时，内部的悬浮面板也能像被磁铁吸附一样实时更新坐标。
+ */
+void WT_DataWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    updateSamplingWidgetGeometry();
+}
+
+
+// =========================================================================
+// =                           事件回调与通信模块                             =
+// =========================================================================
+
+/**
+ * @brief 接收组件内部处理后的最终数据
+ */
+void WT_DataWidget::onSamplingFinished(const QStringList& headers, const QVector<QStringList>& processedTable)
+{
+    if (processedTable.isEmpty()) {
+        QMessageBox::warning(this, "错误", "处理后数据为空，请检查参数设置！");
+        return;
+    }
+    QString currentPath = getCurrentFileName();
+    saveAndLoadNewData(currentPath, headers, processedTable);
+}
+
+/**
+ * @brief 基础数据保存逻辑：将完整二维表落盘并形成新的工作页签加载
+ */
 void WT_DataWidget::saveAndLoadNewData(const QString& oldFilePath, const QStringList& headers, const QVector<QStringList>& fullTable)
 {
     QFileInfo fi(oldFilePath);
     QString baseName = fi.completeBaseName();
     QString dir = fi.absolutePath();
 
+    // 构建默认带时间戳的文件名防止覆盖原始数据
     QString defaultName = QString("%1_处理后_%2.xlsx").arg(baseName).arg(QDateTime::currentDateTime().toString("HHmmss"));
     QString defaultPath = dir + "/" + defaultName;
 
@@ -559,6 +770,7 @@ void WT_DataWidget::saveAndLoadNewData(const QString& oldFilePath, const QString
             xlsx.write(3, c + 1, headers[c], headerFormat);
         }
 
+        // 强行用 try-toDouble 来避免直接存字符串，以便在 Excel 内部仍然是纯数字单元格
         for (int r = 0; r < fullTable.size(); ++r) {
             for (int c = 0; c < fullTable[r].size(); ++c) {
                 bool ok;
@@ -588,6 +800,7 @@ void WT_DataWidget::saveAndLoadNewData(const QString& oldFilePath, const QString
         file.close();
     }
 
+    // 使用向导设定的标准进行自动挂载加载
     DataImportSettings settings;
     settings.filePath = savePath;
     settings.encoding = "UTF-8";
@@ -601,17 +814,27 @@ void WT_DataWidget::saveAndLoadNewData(const QString& oldFilePath, const QString
     ui->statusLabel->setText("处理完成，保留有效点数: " + QString::number(fullTable.size()));
 }
 
-void WT_DataWidget::onExportExcel() { if (auto s = currentSheet()) s->onExportExcel(); }
-void WT_DataWidget::onTimeConvert() { if (auto s = currentSheet()) s->onTimeConvert(); }
-void WT_DataWidget::onPressureDropCalc() { if (auto s = currentSheet()) s->onPressureDropCalc(); }
-void WT_DataWidget::onCalcPwf() { if (auto s = currentSheet()) s->onCalcPwf(); }
-void WT_DataWidget::onHighlightErrors() { if (auto s = currentSheet()) s->onHighlightErrors(); }
-
+/**
+ * @brief 页签切换触发回调
+ */
 void WT_DataWidget::onTabChanged(int index) {
     Q_UNUSED(index);
     updateButtonsState();
+
+    // 若悬浮面板仍然显示，随着页签的切换，面板内部展示的数据也要一起切换为新表
+    if(m_samplingWidget && m_samplingWidget->isVisible()){
+        m_samplingWidget->setModel(getDataModel());
+
+        // 切页会导致底层表格的长宽、滚动条发生变化，需要同步校准悬浮窗的自动吸附坐标
+        updateSamplingWidgetGeometry();
+    }
+
     emit dataChanged();
 }
+
+/**
+ * @brief 处理标签页删除
+ */
 void WT_DataWidget::onTabCloseRequested(int index) {
     QWidget* widget = ui->tabWidget->widget(index);
     if (widget) {
@@ -619,8 +842,21 @@ void WT_DataWidget::onTabCloseRequested(int index) {
         delete widget;
     }
     updateButtonsState();
+
+    // 如果没有数据表了，悬浮面板也应该随之强行消失
+    if (!hasData() && m_samplingWidget) {
+        m_samplingWidget->hide();
+    } else if (hasData() && m_samplingWidget && m_samplingWidget->isVisible()){
+        m_samplingWidget->setModel(getDataModel());
+        updateSamplingWidgetGeometry();
+    }
+
     emit dataChanged();
 }
+
+/**
+ * @brief 代理向下子组件发出的数据变动信号
+ */
 void WT_DataWidget::onSheetDataChanged() {
     if (sender() == currentSheet()) emit dataChanged();
 }
