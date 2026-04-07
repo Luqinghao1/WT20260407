@@ -4,13 +4,9 @@
  * 功能描述:
  * 1. 管理 QTabWidget，支持多标签页显示多份数据文件。
  * 2. 实现了多文件同时打开、解析与展示的功能。
- * 3. 实现了数据的同步保存与从工程文件中恢复的功能。
- * 4. 实现了 getAllDataModels，遍历所有页签收集数据模型，向下游提供数据源。
- * 5. 统一数据界面弹窗的按钮样式为“灰底黑字”，提高可视性。
- * 6. 实现了 onFilterSample 函数，集成优化的 DataSamplingDialog 弹窗进行多阶段滤波与抽样。
- * 7. 数据保存增加原生 Excel (.xlsx, .xls) 支持，利用 QXlsx 将全表完美导出。
- * 8. 彻底整合列属性定义与单位标准化，引入统一的 onUnitManager 槽函数。
- * 9. [修改] 更新底层计算或单位换算时的存入逻辑，杜绝运算过程中引入的科学计数法。
+ * 3. 将9个数据处理按钮配置为 `QToolButton` 并设定为上图标下文字的单排样式。
+ * 4. 【核心重构】使用 QPainter 动态生成9款对应功能的矢量图标，彻底解决无图可用的问题。
+ * 5. 杜绝了底层计算或单位换算时产生科学计数法的问题，统一输出常规格式。
  */
 
 #include "wt_datawidget.h"
@@ -20,6 +16,10 @@
 #include "datasamplingdialog.h"
 #include "dataunitdialog.h"
 #include "dataunitmanager.h"
+#include <QToolButton>
+#include <QPainter>
+#include <QPixmap>
+#include <QPolygon>
 
 // 引入 QXlsx 支持数据直接写入 Excel
 #include "xlsxdocument.h"
@@ -36,7 +36,7 @@
 #include <QDateTime>
 
 /**
- * @brief 统一应用数据对话框的样式
+ * @brief 统一应用数据对话框的样式，灰底黑字提高可视性
  */
 static void applyDataDialogStyle(QWidget* dialog) {
     if (!dialog) return;
@@ -54,9 +54,9 @@ static void applyDataDialogStyle(QWidget* dialog) {
     dialog->setStyleSheet(qss);
 }
 
-// ============================================================================
-// [辅助函数] 格式化为常规数字：杜绝底层计算或换算导致的科学计数法
-// ============================================================================
+/**
+ * @brief 将双精度浮点数格式化为常规字符串，杜绝科学计数法
+ */
 static QString formatToNormalNumber(double val) {
     QString res = QString::number(val, 'f', 8);
     if (res.contains('.')) {
@@ -80,31 +80,149 @@ WT_DataWidget::~WT_DataWidget()
     delete ui;
 }
 
+/**
+ * @brief 使用 QPainter 在内存中绘制扁平化风格的矢量图标
+ * @param iconType 功能标识名
+ * @return 绘制好的 QIcon 对象
+ * 作用：替代缺失的图片资源，确保界面拥有上图标下文字的美观展现
+ */
+QIcon WT_DataWidget::createCustomIcon(const QString& iconType)
+{
+    QPixmap pixmap(64, 64);
+    pixmap.fill(Qt::transparent); // 透明背景
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing); // 抗锯齿开启
+
+    if (iconType == "open") {
+        // 绘制黄色文件夹 (打开数据)
+        painter.setBrush(QColor("#FFCA28"));
+        painter.setPen(Qt::NoPen);
+        painter.drawRect(8, 24, 48, 32);
+        painter.drawPolygon(QPolygon({QPoint(8, 24), QPoint(20, 12), QPoint(32, 12), QPoint(44, 24)}));
+    }
+    else if (iconType == "save") {
+        // 绘制绿色保存按钮(软盘概念)
+        painter.setBrush(QColor("#4CAF50"));
+        painter.setPen(Qt::NoPen);
+        painter.drawRect(12, 12, 40, 40);
+        painter.setBrush(Qt::white);
+        painter.drawRect(20, 12, 24, 16); // 顶部标签
+        painter.drawRect(24, 36, 16, 16); // 底部写入区
+    }
+    else if (iconType == "export") {
+        // 绘制绿色表格 (导出Excel)
+        painter.setBrush(QColor("#43A047"));
+        painter.setPen(Qt::NoPen);
+        painter.drawRect(10, 10, 44, 44);
+        painter.setPen(QPen(Qt::white, 4));
+        painter.drawLine(10, 26, 54, 26);
+        painter.drawLine(32, 10, 32, 54);
+    }
+    else if (iconType == "unit") {
+        // 绘制青色标尺 (单位管理)
+        painter.setBrush(QColor("#00ACC1"));
+        painter.setPen(Qt::NoPen);
+        painter.drawRect(8, 26, 48, 14);
+        painter.setPen(QPen(Qt::white, 2));
+        for (int i = 12; i <= 52; i += 8) {
+            painter.drawLine(i, 26, i, (i % 16 == 12) ? 34 : 31);
+        }
+    }
+    else if (iconType == "time") {
+        // 绘制橙色时钟 (时间转换)
+        painter.setBrush(QColor("#FF9800"));
+        painter.setPen(Qt::NoPen);
+        painter.drawEllipse(12, 12, 40, 40);
+        painter.setPen(QPen(Qt::white, 4, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(32, 32, 32, 20); // 时针
+        painter.drawLine(32, 32, 42, 32); // 分针
+    }
+    else if (iconType == "pressuredrop") {
+        // 绘制红色下降箭头 (计算压降)
+        painter.setBrush(QColor("#E53935"));
+        painter.setPen(Qt::NoPen);
+        painter.drawPolygon(QPolygon({QPoint(24, 10), QPoint(40, 10), QPoint(40, 34), QPoint(50, 34), QPoint(32, 54), QPoint(14, 34), QPoint(24, 34)}));
+    }
+    else if (iconType == "pwf") {
+        // 绘制深蓝井筒结构 (套压转流压)
+        painter.setBrush(QColor("#3949AB"));
+        painter.setPen(Qt::NoPen);
+        painter.drawRect(24, 8, 16, 48); // 井管
+        painter.setBrush(QColor("#29B6F6"));
+        painter.drawRect(24, 36, 16, 20); // 内部流体
+    }
+    else if (iconType == "filter") {
+        // 绘制紫色漏斗 (滤波取样)
+        painter.setBrush(QColor("#8E24AA"));
+        painter.setPen(Qt::NoPen);
+        painter.drawPolygon(QPolygon({QPoint(10, 12), QPoint(54, 12), QPoint(36, 32), QPoint(36, 52), QPoint(28, 52), QPoint(28, 32)}));
+    }
+    else if (iconType == "error") {
+        // 绘制深橙警示牌 (异常检查)
+        painter.setBrush(QColor("#F4511E"));
+        painter.setPen(Qt::NoPen);
+        painter.drawPolygon(QPolygon({QPoint(32, 10), QPoint(56, 52), QPoint(8, 52)}));
+        painter.setPen(QPen(Qt::white, 4, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(32, 24, 32, 38); // 惊叹号竖线
+        painter.drawPoint(32, 46);        // 惊叹号底点
+    }
+
+    return QIcon(pixmap);
+}
+
+/**
+ * @brief 界面控件初始化，将9个按钮统一配置样式和自主生成的图标
+ */
 void WT_DataWidget::initUI()
 {
+    // 获取UI中已排好一排的QToolButton
+    QList<QToolButton*> toolButtons = {
+        ui->btnOpenFile, ui->btnSave, ui->btnExport,
+        ui->btnUnitManager, ui->btnTimeConvert, ui->btnPressureDropCalc,
+        ui->btnCalcPwf, ui->btnFilterSample, ui->btnErrorCheck
+    };
+
+    // 对应的图标代号数组
+    QStringList iconTypes = {
+        "open", "save", "export",
+        "unit", "time", "pressuredrop",
+        "pwf", "filter", "error"
+    };
+
+    // 循环遍历设置按钮样式
+    for (int i = 0; i < toolButtons.size(); ++i) {
+        if (toolButtons[i]) {
+            // 设置枚举：图标在上，文字在下
+            toolButtons[i]->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+            // 调用程序化绘图赋予独立图标
+            toolButtons[i]->setIcon(createCustomIcon(iconTypes[i]));
+            // 设定统一的图标显示大小
+            toolButtons[i]->setIconSize(QSize(36, 36));
+            // 设定舒适的宽容尺寸，防止由于文字字数不同导致参差不齐
+            toolButtons[i]->setMinimumSize(QSize(80, 75));
+            toolButtons[i]->setMaximumSize(QSize(100, 90));
+        }
+    }
+
+    // 根据初始数据更新是否置灰
     updateButtonsState();
 }
 
+/**
+ * @brief 绑定界面按键到各个功能槽函数
+ */
 void WT_DataWidget::setupConnections()
 {
-    // 文件操作区
-    connect(ui->btnOpenFile, &QPushButton::clicked, this, &WT_DataWidget::onOpenFile);
-    connect(ui->btnSave, &QPushButton::clicked, this, &WT_DataWidget::onSave);
-    connect(ui->btnExport, &QPushButton::clicked, this, &WT_DataWidget::onExportExcel);
+    connect(ui->btnOpenFile, &QToolButton::clicked, this, &WT_DataWidget::onOpenFile);
+    connect(ui->btnSave, &QToolButton::clicked, this, &WT_DataWidget::onSave);
+    connect(ui->btnExport, &QToolButton::clicked, this, &WT_DataWidget::onExportExcel);
+    connect(ui->btnUnitManager, &QToolButton::clicked, this, &WT_DataWidget::onUnitManager);
+    connect(ui->btnTimeConvert, &QToolButton::clicked, this, &WT_DataWidget::onTimeConvert);
+    connect(ui->btnPressureDropCalc, &QToolButton::clicked, this, &WT_DataWidget::onPressureDropCalc);
+    connect(ui->btnCalcPwf, &QToolButton::clicked, this, &WT_DataWidget::onCalcPwf);
+    connect(ui->btnFilterSample, &QToolButton::clicked, this, &WT_DataWidget::onFilterSample);
+    connect(ui->btnErrorCheck, &QToolButton::clicked, this, &WT_DataWidget::onHighlightErrors);
 
-    // 数据处理区
-    connect(ui->btnUnitManager, &QPushButton::clicked, this, &WT_DataWidget::onUnitManager); // 统一的单位管理按钮
-    connect(ui->btnTimeConvert, &QPushButton::clicked, this, &WT_DataWidget::onTimeConvert);
-    connect(ui->btnPressureDropCalc, &QPushButton::clicked, this, &WT_DataWidget::onPressureDropCalc);
-    connect(ui->btnCalcPwf, &QPushButton::clicked, this, &WT_DataWidget::onCalcPwf);
-
-    // 滤波与采样
-    connect(ui->btnFilterSample, &QPushButton::clicked, this, &WT_DataWidget::onFilterSample);
-
-    // 异常检查
-    connect(ui->btnErrorCheck, &QPushButton::clicked, this, &WT_DataWidget::onHighlightErrors);
-
-    // 标签页交互
     connect(ui->tabWidget, &QTabWidget::currentChanged, this, &WT_DataWidget::onTabChanged);
     connect(ui->tabWidget, &QTabWidget::tabCloseRequested, this, &WT_DataWidget::onTabCloseRequested);
 }
@@ -299,7 +417,6 @@ void WT_DataWidget::onUnitManager()
     int colCount = model->columnCount();
 
     if (!saveToFile) {
-        // ========== 模式 A：直接修改当前内存数据表格 ==========
         if (appendMode) {
             int insertPos = colCount;
             for (const auto& task : tasks) {
@@ -311,7 +428,6 @@ void WT_DataWidget::onUnitManager()
                         bool ok; double val = origText.toDouble(&ok);
                         if (ok) {
                             double newVal = DataUnitManager::instance()->convert(val, task.quantityType, task.fromUnit, task.toUnit);
-                            // 【修改点】：取消 'g' 格式避免科学计数法，使用自定义常规格式函数
                             model->setItem(r, insertPos, new QStandardItem(formatToNormalNumber(newVal)));
                         } else {
                             model->setItem(r, insertPos, new QStandardItem(""));
@@ -323,7 +439,6 @@ void WT_DataWidget::onUnitManager()
                 insertPos++;
             }
         } else {
-            // 替换模式：覆盖原列的数据
             for (const auto& task : tasks) {
                 model->setHeaderData(task.colIndex, Qt::Horizontal, task.newHeaderName);
                 if (task.needsMathConversion) {
@@ -332,7 +447,6 @@ void WT_DataWidget::onUnitManager()
                         bool ok; double val = origText.toDouble(&ok);
                         if (ok) {
                             double newVal = DataUnitManager::instance()->convert(val, task.quantityType, task.fromUnit, task.toUnit);
-                            // 【修改点】：使用自定义常规格式函数
                             model->item(r, task.colIndex)->setText(formatToNormalNumber(newVal));
                         }
                     }
@@ -343,7 +457,6 @@ void WT_DataWidget::onUnitManager()
         ui->statusLabel->setText("列属性与单位已在当前表格中更新完毕。");
 
     } else {
-        // ========== 模式 B：生成新文件并加载为新页签 ==========
         QVector<QStringList> fullTable;
         QStringList headers;
 
@@ -367,7 +480,6 @@ void WT_DataWidget::onUnitManager()
                         bool ok; double val = rowData[task.colIndex].toDouble(&ok);
                         if (ok) {
                             double nV = DataUnitManager::instance()->convert(val, task.quantityType, task.fromUnit, task.toUnit);
-                            // 【修改点】：使用自定义常规格式函数
                             rowData.append(formatToNormalNumber(nV));
                         } else {
                             rowData.append("");
@@ -382,7 +494,6 @@ void WT_DataWidget::onUnitManager()
                         bool ok; double val = rowData[task.colIndex].toDouble(&ok);
                         if (ok) {
                             double nV = DataUnitManager::instance()->convert(val, task.quantityType, task.fromUnit, task.toUnit);
-                            // 【修改点】：使用自定义常规格式函数
                             rowData[task.colIndex] = formatToNormalNumber(nV);
                         }
                     }
@@ -407,15 +518,12 @@ void WT_DataWidget::onFilterSample()
 
     DataSamplingDialog dialog(model, this);
     if (dialog.exec() == QDialog::Accepted) {
-
         QVector<QStringList> processedTable = dialog.getProcessedTable();
         QStringList headers = dialog.getHeaders();
-
         if (processedTable.isEmpty()) {
             QMessageBox::warning(this, "错误", "处理后数据为空，请检查参数设置！");
             return;
         }
-
         QString currentPath = getCurrentFileName();
         saveAndLoadNewData(currentPath, headers, processedTable);
     }
@@ -455,7 +563,6 @@ void WT_DataWidget::saveAndLoadNewData(const QString& oldFilePath, const QString
             for (int c = 0; c < fullTable[r].size(); ++c) {
                 bool ok;
                 double val = fullTable[r][c].toDouble(&ok);
-                // 这里 fullTable 中的字符串已经是正常格式，直接写入或按数值写入皆可
                 if (ok) xlsx.write(r + 4, c + 1, val);
                 else xlsx.write(r + 4, c + 1, fullTable[r][c]);
             }
@@ -505,7 +612,6 @@ void WT_DataWidget::onTabChanged(int index) {
     updateButtonsState();
     emit dataChanged();
 }
-
 void WT_DataWidget::onTabCloseRequested(int index) {
     QWidget* widget = ui->tabWidget->widget(index);
     if (widget) {
@@ -515,9 +621,6 @@ void WT_DataWidget::onTabCloseRequested(int index) {
     updateButtonsState();
     emit dataChanged();
 }
-
 void WT_DataWidget::onSheetDataChanged() {
-    if (sender() == currentSheet()) {
-        emit dataChanged();
-    }
+    if (sender() == currentSheet()) emit dataChanged();
 }
