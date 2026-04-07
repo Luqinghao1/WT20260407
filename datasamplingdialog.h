@@ -1,21 +1,18 @@
 /*
  * 文件名: datasamplingdialog.h
- * 文件作用: 数据滤波与取样设置对话框头文件
- * 功能描述:
- * 1. 提供用户界面以设置数据滤波和抽样参数，支持自定义选取X/Y轴。
- * 2. 界面配色优化：小标题加粗蓝色，应用预览(绿)、重置(蓝)、取消(红)，符合工程软件直觉。
- * 3. 抽样默认策略改为“对数抽样 (N=20)”，滤波默认为“无滤波”。
- * 4. 增加了 UI 状态联动：当选择无滤波时，“参考点数”输入框自动置灰不可用。
- * 5. 图例移至左上角，上下图数据点分别采用红色和深蓝色。
+ * 作用: 数据滤波与取样悬浮窗口头文件
+ * 更新: 新增了对左侧边缘拖拽缩放的鼠标事件支持，以及绘制标题栏图标的支持。
  */
 
 #ifndef DATASAMPLINGDIALOG_H
 #define DATASAMPLINGDIALOG_H
 
-#include <QDialog>
+#include <QWidget>
 #include <QVector>
 #include <QStringList>
 #include <QStandardItemModel>
+#include <QMouseEvent>
+#include <QIcon>
 #include "qcustomplot.h"
 
 class QComboBox;
@@ -23,18 +20,33 @@ class QCheckBox;
 class QDoubleSpinBox;
 class QSpinBox;
 class QPushButton;
+class QLabel;
 
-class DataSamplingDialog : public QDialog
+class DataSamplingWidget : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit DataSamplingDialog(QStandardItemModel* model, QWidget *parent = nullptr);
-    ~DataSamplingDialog();
+    explicit DataSamplingWidget(QWidget *parent = nullptr);
+    ~DataSamplingWidget();
 
-    // 获取处理后的完整二维表格数据及表头
+    void setModel(QStandardItemModel* model);
+
     QVector<QStringList> getProcessedTable() const;
     QStringList getHeaders() const;
+
+signals:
+    void requestMaximize(); // 请求最大化
+    void requestRestore();  // 请求恢复默认对齐大小
+    void requestClose();    // 请求关闭
+    void requestResize(int dx); // 【新增】请求主界面配合进行水平宽度拉伸
+    void processingFinished(const QStringList& headers, const QVector<QStringList>& processedTable);
+
+protected:
+    // 【新增】重载鼠标事件以支持悬浮窗边缘的手动拖拽拉伸
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
 
 private slots:
     void onPreviewClicked();
@@ -43,7 +55,6 @@ private slots:
     void onAxisScaleChanged();
     void onSplitBoxValueChanged();
 
-    // 拖拽事件
     void onRawPlotMousePress(QMouseEvent *event);
     void onRawPlotMouseMove(QMouseEvent *event);
     void onRawPlotMouseRelease(QMouseEvent *event);
@@ -52,6 +63,9 @@ private:
     void initUI();
     void setupConnections();
     void applyStyle();
+
+    // 【新增】纯代码绘制控制台矢量图标
+    QIcon createCtrlIcon(int type);
 
     void loadRawData();
     void updateSplitLines();
@@ -95,12 +109,20 @@ private:
     QPushButton* btnOk;
     QPushButton* btnCancel;
 
+    QPushButton* btnMaximizeWindow;
+    QPushButton* btnRestoreWindow;
+    QPushButton* btnCloseWindow;
+
     QCustomPlot* customPlotRaw;
     QCustomPlot* customPlotProcessed;
     QCPItemStraightLine *vLine1, *vLine2;
     QCPItemStraightLine *vLine1_proc, *vLine2_proc;
 
     int m_dragLineIndex;
+
+    // 窗口拉伸的状态标记
+    bool m_isResizing;
+    int m_dragStartX;
 };
 
 #endif // DATASAMPLINGDIALOG_H
