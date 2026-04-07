@@ -11,19 +11,25 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>陆相泥纹型及混积型页岩油压裂水平井非均匀产液机制与试井解释方法研究</string>
+   <string>页岩油多级压裂水平井试井解释软件</string>
   </property>
   <widget class="QWidget" name="centralwidget">
    <property name="styleSheet">
     <string notr="true">#centralwidget
 {
-        border-image: url(:/new/prefix1/Resource/background3.svg);
+    background-color: #E1F5FE; /* 底部基准背景颜色设置为浅蓝 */
 }
 QWidget
 {
-color: rgb(255, 255, 255);
-
-        font: 75 8pt &quot;微软雅黑&quot;;
+    color: #333333; /* 【关键修改】为了适配浅橘色和浅蓝色的背景，将原本白色的全局字体改为深灰色，确保文字清晰可见 */
+    font: 75 8pt &quot;微软雅黑&quot;;
+}
+#NavigationBar {
+    background-color: #FFE0B2; /* 左侧区域：淡橘色 */
+    border-right: 1px solid #FFCC80; /* 分割线颜色调整为深一点的橘色，自然过渡 */
+}
+#stackedWidget {
+    background-color: #E1F5FE; /* 右侧功能区域：浅蓝色 */
 }
 </string>
    </property>
@@ -56,9 +62,6 @@ color: rgb(255, 255, 255);
         <width>116</width>
         <height>16777215</height>
        </size>
-      </property>
-      <property name="styleSheet">
-       <string notr="true">background-color: rgb(0, 0, 0,0);</string>
       </property>
       <layout class="QVBoxLayout" name="verticalLayout">
        <property name="leftMargin">
@@ -205,7 +208,7 @@ color: rgb(255, 255, 255);
           <string>TextLabel</string>
          </property>
          <property name="alignment">
-          <set>Qt::AlignmentFlag::AlignCenter</set>
+           <set>Qt::AlignmentFlag::AlignCenter</set>
          </property>
         </widget>
        </item>
@@ -214,9 +217,6 @@ color: rgb(255, 255, 255);
     </item>
     <item>
      <widget class="QStackedWidget" name="stackedWidget">
-      <property name="styleSheet">
-       <string notr="true">background-color: rgb(0, 0, 0,0);</string>
-      </property>
       <property name="currentIndex">
        <number>0</number>
       </property>
